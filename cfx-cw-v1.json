@@ -1,0 +1,811 @@
+{
+	"AWSTemplateFormatVersion": "2010-09-09",
+	"Description": "Send CloudTrail and EC2 logs to CloudWatch version 1",
+	"Parameters": {
+		"pStackName": {
+			"Description": "Enter the production APP stake name",
+			"Type": "String",
+			"MinLength": "3",
+			"MaxLength": "24",
+			"AllowedPattern": "^[a-zA-Z][-a-zA-Z0-9]*$",
+			"Default": "cfx-summpro-app",
+			"ConstraintDescription": "Stack name must be between 6 and 24 characters to proceed"
+		},
+		"pStackVPCName": {
+			"Description": "Enter the production VPC stake name",
+			"Type": "String",
+			"MinLength": "3",
+			"MaxLength": "24",
+			"AllowedPattern": "^[a-zA-Z][-a-zA-Z0-9]*$",
+			"Default": "cfx-summpro-vpc-prod",
+			"ConstraintDescription": "Stack name must be between 6 and 24 characters to proceed"
+		},			
+		"pOperatorEmail": {
+			"Description": "Email address for SNS notifications",
+			"Type": "String"
+		},		
+		"EULA": {
+			"Description": "You must accept End User License Agreement (EULA), see http://accessdata.com/ADG_EULA",
+			"Type": "String",
+			"AllowedValues": ["Yes"],
+			"ConstraintDescription": "You must accept End User License Agreement (EULA). Select Yes to proceed"
+		}
+	},
+	"Metadata": {
+		"AWS::CloudFormation::Interface": {
+			"ParameterGroups": [
+			{
+				"Label": {
+					"default": "Enter SNS Email Notification"
+				},
+				"Parameters": ["pOperatorEmail"]
+			},
+				{
+				"Label": {
+					"default": "Other"
+				},
+				"Parameters": ["EULA"]
+			}],
+			"ParameterLabels": {
+				"pOperatorEmail": {
+					"default": "Enter Email"
+				},
+				"EULA": {
+					"default": "Accept Terms and Conditions"
+				}
+			}
+		}
+	},
+	"Resources": {
+		"rLogGroup": {
+			"Type": "AWS::Logs::LogGroup",
+			"Properties": {
+				"RetentionInDays": 30
+			}
+		},
+		"rCloudTrailBucket": {
+			"Type": "AWS::S3::Bucket",
+			"DeletionPolicy": "Retain",
+			"Properties": {
+				"AccessControl": "Private",
+				"VersioningConfiguration": {
+					"Status": "Enabled"
+				}
+				
+			}
+		},	
+		"rCloudTrailS3Policy": {
+			"Type": "AWS::S3::BucketPolicy",
+			"DependsOn": "rCloudTrailBucket",
+			"Properties": {
+				"Bucket": {"Ref":"rCloudTrailBucket"},
+				"PolicyDocument": {
+					"Statement": [
+						{
+							"Sid": "AWSCloudTrailAclCheck20150319",
+							"Effect": "Allow",
+							"Principal": {"Service": "cloudtrail.amazonaws.com"},
+							"Action": "s3:GetBucketAcl",
+							"Resource":{
+								"Fn::Join":["",["arn:aws:s3:::",{"Ref": "rCloudTrailBucket"}]]}
+						},
+						{
+							"Sid": "AWSCloudTrailWrite20150319",
+							"Effect": "Allow",
+							"Principal": {"Service": "cloudtrail.amazonaws.com"},
+							"Action": "s3:PutObject",
+							"Resource":{"Fn::Join":["",["arn:aws:s3:::",{"Ref": "rCloudTrailBucket"},"/*"]]},
+							"Condition": {
+								"StringEquals": {
+									"s3:x-amz-acl": "bucket-owner-full-control"
+								}
+							}
+						},
+						{
+							"Sid": "DenyUnEncryptedObjectUploads",
+							"Effect": "Deny",
+							"Principal": "*",
+							"Action": "s3:PutObject",
+							"Resource": {"Fn::Join": [ "",["arn:aws:s3:::",{"Ref": "rCloudTrailBucket"},"/*"]]},
+							"Condition": {
+								"StringNotEquals": {
+									"s3:x-amz-server-side-encryption": "AES256"
+								}
+							}
+						}					
+					]
+				}
+			}
+		},
+		"rCloudTrailLoggingLocal": {
+			"Type": "AWS::CloudTrail::Trail",
+			"DependsOn":"rCloudTrailS3Policy",
+			"Properties": {
+				"S3BucketName": {"Ref":"rCloudTrailBucket"},
+				"IsLogging": true,
+				"EnableLogFileValidation": true,
+				"IncludeGlobalServiceEvents": true,
+				"CloudWatchLogsLogGroupArn": { "Fn::GetAtt" : [ "rCloudTrailLogGroup", "Arn" ]},
+				"CloudWatchLogsRoleArn": { "Fn::GetAtt" : [ "rCloudWatchLogsRole", "Arn" ]}
+			}
+        },			
+		"rCloudWatchLogsRole": {
+			"Type": "AWS::IAM::Role",
+			"Properties": {
+				"AssumeRolePolicyDocument": {
+					"Statement": [{
+						"Effect": "Allow",
+						"Principal": {
+							"Service": ["cloudtrail.amazonaws.com"]
+						},
+						"Action": ["sts:AssumeRole"]
+					}]
+				},
+				"Path": "/",
+				"Policies": [{
+					"PolicyName": "cloudwatchlogsrole",
+					"PolicyDocument": {
+						"Version": "2012-10-17",
+						"Statement": [
+							{
+								"Sid": "AWSCloudTrailCreateLogStream20141101",
+								"Effect": "Allow",
+								"Action": ["logs:CreateLogStream"],
+								"Resource": "*"
+							},										
+							{
+								"Sid": "AWSCloudTrailPutLogEvents20141101",
+								"Effect": "Allow",
+								"Action": ["logs:PutLogEvents"],
+								"Resource":"*" 
+							}
+						
+						]
+					}
+				}]
+			}
+		},
+		"rCloudTrailRole": {
+			"Type": "AWS::IAM::Role",
+			"Properties": {
+				"AssumeRolePolicyDocument": {
+					"Statement": [
+						{
+							"Effect": "Allow",
+							"Principal": {
+								"Service": [
+									"ec2.amazonaws.com"
+								]
+							},
+							"Action": [
+								"sts:AssumeRole"
+							]
+						}
+					]
+				},
+				"Path": "/",
+				"Policies": [
+					{
+						"PolicyName": "cloudtrail-limited-actions",
+						"PolicyDocument": {
+							"Version": "2012-10-17",
+							"Statement": [
+								{
+									"Effect": "Allow",
+									"Action": [
+										"s3:ListBucket"
+									],
+									"Resource": "*"
+								},
+								{
+									"Effect": "Allow",
+									"Action": [
+										"s3:PutObject",
+										"s3:GetObject"
+									],
+									"Resource": "*"
+								}
+							]
+						}
+					}
+				]
+			}
+		},
+		"rCloudTrailProfile": {
+			"Type": "AWS::IAM::InstanceProfile",
+			"DependsOn": "rCloudTrailRole",
+			"Properties": {
+				"Path": "/",
+				"Roles": [
+					{"Ref":"rCloudTrailRole"}
+				]
+			}
+		},
+		"rCloudTrailLogGroup": {
+			"Type": "AWS::Logs::LogGroup",
+			"Properties": {
+				"RetentionInDays": 90
+			}
+		},
+		"rIAMPolicyChangesMetricFilter": {
+			"Type": "AWS::Logs::MetricFilter",
+			"Properties": {
+				"LogGroupName":{"Ref":"rCloudTrailLogGroup"},
+				"FilterPattern": "{($.eventName=DeleteGroupPolicy)||($.eventName=DeleteRolePolicy)||($.eventName=DeleteUserPolicy)||($.eventName=PutGroupPolicy)||($.eventName=PutRolePolicy)||($.eventName=PutUserPolicy)||($.eventName=CreatePolicy)||($.eventName=DeletePolicy)||($.eventName=CreatePolicyVersion)||($.eventName=DeletePolicyVersion)||($.eventName=AttachRolePolicy)||($.eventName=DetachRolePolicy)||($.eventName=AttachUserPolicy)||($.eventName=DetachUserPolicy)||($.eventName=AttachGroupPolicy)||($.eventName=DetachGroupPolicy)}",
+				"MetricTransformations": [
+					{
+						"MetricNamespace": "CloudTrailMetrics",
+						"MetricName": "IAMPolicyEventCount",
+						"MetricValue": 1
+					}
+				]
+			}
+		},
+		"rNetworkAclChangesMetricFilter": {
+			"Type": "AWS::Logs::MetricFilter",
+			"Properties": {
+				"LogGroupName": {"Ref":"rCloudTrailLogGroup"},
+				"FilterPattern": "{ ($.eventName = CreateNetworkAcl) || ($.eventName = CreateNetworkAclEntry) || ($.eventName = DeleteNetworkAcl) || ($.eventName = DeleteNetworkAclEntry) || ($.eventName = ReplaceNetworkAclEntry) || ($.eventName = ReplaceNetworkAclAssociation) }",
+				"MetricTransformations": [
+					{
+						"MetricNamespace": "CloudTrailMetrics",
+						"MetricName": "NetworkAclEventCount",
+						"MetricValue": 1
+					}
+				]
+			}
+		},
+		"rNetworkAclChangesAlarm": {
+			"Type": "AWS::CloudWatch::Alarm",
+			"Properties": {
+				"AlarmDescription": "Alarms when an API call is made to create, update or delete a Network ACL.",
+				"AlarmActions": [
+					{
+						"Ref": "rAlarmNotificationTopic"
+					}
+				],
+				"MetricName": "NetworkAclEventCount",
+				"Namespace": "CloudTrailMetrics",
+				"ComparisonOperator": "GreaterThanOrEqualToThreshold",
+				"EvaluationPeriods": 1,
+				"Period": 300,
+				"Statistic": "Sum",
+				"Threshold": 1
+			}
+		},
+		"rSecurityGroupChangesMetricFilter": {
+			"Type": "AWS::Logs::MetricFilter",
+			"Properties": {
+				"LogGroupName": {"Ref":"rCloudTrailLogGroup"},
+				"FilterPattern": "{ ($.eventName = AuthorizeSecurityGroupIngress) || ($.eventName = AuthorizeSecurityGroupEgress) || ($.eventName = RevokeSecurityGroupIngress) || ($.eventName = RevokeSecurityGroupEgress) || ($.eventName = CreateSecurityGroup) || ($.eventName = DeleteSecurityGroup) }",
+				"MetricTransformations": [
+					{
+						"MetricNamespace": "CloudTrailMetrics",
+						"MetricName": "SecurityGroupEventCount",
+						"MetricValue": 1
+					}
+				]
+			}
+		},
+		"rSecurityGroupChangesAlarm": {
+			"Type": "AWS::CloudWatch::Alarm",
+			"DependsOn": "rNetworkAclChangesAlarm",
+			"Properties": {
+				"AlarmDescription": "Alarms when an API call is made to create, update or delete a Security Group.",
+				"AlarmActions": [
+				    {
+						"Ref": "rAlarmNotificationTopic"
+					}
+				],
+				"MetricName": "SecurityGroupEventCount",
+				"Namespace": "CloudTrailMetrics",
+				"ComparisonOperator": "GreaterThanOrEqualToThreshold",
+				"EvaluationPeriods": 1,
+				"Period": 300,
+				"Statistic": "Sum",
+				"Threshold": 1
+			}
+		},
+		"rIAMRootActivity": {
+			"Type": "AWS::Logs::MetricFilter",
+			"Properties": {
+				"LogGroupName": {"Ref":"rCloudTrailLogGroup"},
+				"FilterPattern": "{ $.userIdentity.type = \"Root\" && $.userIdentity.invokedBy NOT EXISTS && $.eventType != \"AwsServiceEvent\" }",
+				"MetricTransformations": [
+					{
+						"MetricNamespace": "CloudTrailMetrics",
+						"MetricName": "RootUserPolicyEventCount",
+						"MetricValue": 1
+					}
+				]
+			}
+		},
+		"rRootActivityAlarm": {
+			"Type": "AWS::CloudWatch::Alarm",
+			"DependsOn": "rSecurityGroupChangesAlarm",
+			"Properties": {
+				"AlarmDescription": "Root user activity detected!",
+				"AlarmActions": [
+				    {
+						"Ref": "rAlarmNotificationTopic"
+					}				
+			],
+				"MetricName": "RootUserPolicyEventCount",
+				"Namespace": "CloudTrailMetrics",
+				"ComparisonOperator": "GreaterThanOrEqualToThreshold",
+				"EvaluationPeriods": 1,
+				"Period": 300,
+				"Statistic": "Sum",
+				"Threshold": 1
+			}
+		},
+		"rUnauthorizedAttempts": {
+			"Type": "AWS::Logs::MetricFilter",
+			"Properties": {
+				"LogGroupName": {"Ref":"rCloudTrailLogGroup"},
+				"FilterPattern": "{($.errorCode=AccessDenied)||($.errorCode=UnauthorizedOperation)}",
+				"MetricTransformations": [
+					{
+						"MetricNamespace": "CloudTrailMetrics",
+						"MetricName": "UnauthorizedAttemptCount",
+						"MetricValue": 1
+					}
+				]
+			}
+		},
+		"rUnauthorizedAttemptAlarm": {
+			"Type": "AWS::CloudWatch::Alarm",
+			"DependsOn": "rRootActivityAlarm",
+			"Properties": {
+				"AlarmDescription": "Multiple unauthorized actions or logins attempted!",
+				"AlarmActions": [
+					{
+						"Ref": "rAlarmNotificationTopic"
+					}
+				],
+				"MetricName": "UnauthorizedAttemptCount",
+				"Namespace": "CloudTrailMetrics",
+				"ComparisonOperator": "GreaterThanOrEqualToThreshold",
+				"EvaluationPeriods": 1,
+				"Period": 300,
+				"Statistic": "Sum",
+				"Threshold": 5
+			}
+		},
+		"rIAMPolicyChangesAlarm": {
+			"Type": "AWS::CloudWatch::Alarm",
+			"DependsOn": "rUnauthorizedAttemptAlarm",
+			"Properties": {
+				"AlarmDescription": "IAM Configuration changes detected!",
+				"AlarmActions": [
+					{
+						"Ref": "rAlarmNotificationTopic"
+					}
+				],
+				"MetricName": "IAMPolicyEventCount",
+				"Namespace": "CloudTrailMetrics",
+				"ComparisonOperator": "GreaterThanOrEqualToThreshold",
+				"EvaluationPeriods": 1,
+				"Period": 300,
+				"Statistic": "Sum",
+				"Threshold": 1
+			}
+		},
+		"rIAMCreateAccessKeyAlarm": {
+			"Type": "AWS::CloudWatch::Alarm",
+			"DependsOn": "rIAMPolicyChangesAlarm",
+			"Properties": {
+				"AlarmDescription": "Warning: New IAM access key was created. Please be sure this action was neccessary.",
+				"AlarmActions": [
+					{
+						"Ref": "rAlarmNotificationTopic"
+					}
+				],
+				"MetricName": "NewAccessKeyCreated",
+				"Namespace": "CloudTrailMetrics",
+				"ComparisonOperator": "GreaterThanOrEqualToThreshold",
+				"EvaluationPeriods": 1,
+				"Period": 300,
+				"Statistic": "Sum",
+				"Threshold": 1
+			}
+		},
+		"rIAMCreateAccessKey": {
+			"Type": "AWS::Logs::MetricFilter",
+			"DependsOn": "rIAMCreateAccessKeyAlarm",
+			"Properties": {
+				"LogGroupName": {"Ref":"rCloudTrailLogGroup"},
+				"FilterPattern": "{($.eventName=CreateAccessKey)}",
+				"MetricTransformations": [
+					{
+						"MetricNamespace": "CloudTrailMetrics",
+						"MetricName": "NewAccessKeyCreated",
+						"MetricValue": 1
+					}
+				]
+			}
+		},
+		"rCloudTrailChangeAlarm": {
+			"Type": "AWS::CloudWatch::Alarm",
+			"DependsOn": "rIAMCreateAccessKeyAlarm",
+			"Properties": {
+				"AlarmDescription": "Warning: Changes to CloudTrail log configuration detected in this account",
+				"AlarmActions": [
+					{
+						"Ref": "rAlarmNotificationTopic"
+					}
+				],
+				"MetricName": "CloudTrailChangeCount",
+				"Namespace": "CloudTrailMetrics",
+				"ComparisonOperator": "GreaterThanOrEqualToThreshold",
+				"EvaluationPeriods": 1,
+				"Period": 300,
+				"Statistic": "Sum",
+				"Threshold": 1
+			}
+		},
+		"rCloudTrailChange": {
+			"Type": "AWS::Logs::MetricFilter",
+			"Properties": {
+				"LogGroupName": {"Ref":"rCloudTrailLogGroup"},
+				"FilterPattern": "{($.eventSource = cloudtrail.amazonaws.com) && (($.eventName != Describe*) && ($.eventName != Get*) && ($.eventName != Lookup*) && ($.eventName != Lookup*))}",
+				"MetricTransformations": [
+					{
+					"MetricNamespace": "CloudTrailMetrics",
+					"MetricName": "CloudTrailChangeCount",
+					"MetricValue": 1
+					}
+				]
+			}
+		},
+  		"rAlarmNotificationTopic": {
+			"Type": "AWS::SNS::Topic",
+			"Properties": {
+				"Subscription": [
+					{
+					"Endpoint": { "Ref": "pOperatorEmail" },
+					"Protocol": "email"
+					}
+				]
+			}
+		},		
+		"rDocEC2CloudWatch": {
+			"Type": "AWS::SSM::Document",
+			"Properties": {
+				"Content": {
+					"schemaVersion":"1.2",
+					"description":"Export metrics and log files from your instances to Amazon CloudWatch.",
+					"parameters":{
+						"status":{
+							"type":"String",
+							"default":"Enabled",
+							"description":"(Optional) Enable or disable CloudWatch. Valid values: Enabled | Disabled",
+							"allowedValues":[
+								"Enabled",
+								"Disabled"
+							]
+						},
+						"properties":{
+							"type":"String",
+								"default":"",
+								"description":"(Optional) The configuration for CloudWatch in JSON format. Learn more at http://docs.aws.amazon.com/ssm/latest/APIReference/aws-cloudWatch.html",
+								"displayType":"textarea"
+							}
+						},
+					"runtimeConfig":{
+						"aws:cloudWatch":{
+							"settings":{
+								"startType":"{{ status }}"
+								},
+							"properties":{
+								"EngineConfiguration": {
+									"PollInterval": "00:00:15",
+									"Components": [
+										{
+											"Id": "ApplicationEventLog",
+											"FullName": "AWS.EC2.Windows.CloudWatch.EventLog.EventLogInputComponent,AWS.EC2.Windows.CloudWatch",
+											"Parameters": {
+											"LogName": "Application",
+											"Levels": "7"
+											}
+										},
+										{
+											"Id": "SystemEventLog",
+											"FullName": "AWS.EC2.Windows.CloudWatch.EventLog.EventLogInputComponent,AWS.EC2.Windows.CloudWatch",
+											"Parameters": {
+											"LogName": "System",
+											"Levels": "7"
+											}
+										},
+										{
+											"Id": "SecurityEventLog",
+											"FullName": "AWS.EC2.Windows.CloudWatch.EventLog.EventLogInputComponent,AWS.EC2.Windows.CloudWatch",
+											"Parameters": {
+												"LogName": "Security",
+												"Levels": "7"
+											}
+										},
+										{
+											"Id": "ETW",
+											"FullName": "AWS.EC2.Windows.CloudWatch.EventLog.EventLogInputComponent,AWS.EC2.Windows.CloudWatch",
+											"Parameters": {
+												"LogName": "Microsoft-Windows-WinINet/Analytic",
+												"Levels": "7"
+											}
+										},
+										{
+											"Id": "IISLogs",
+											"FullName": "AWS.EC2.Windows.CloudWatch.CustomLog.CustomLogInputComponent,AWS.EC2.Windows.CloudWatch",
+											"Parameters": {
+												"LogDirectoryPath": "C:\\inetpub\\logs\\LogFiles\\W3SVC1",
+												"TimestampFormat": "yyyy-MM-dd HH:mm:ss",
+												"Encoding": "UTF-8",
+												"Filter": "",
+												"CultureName": "en-US",
+												"TimeZoneKind": "UTC",
+												"LineCount": "3"
+											}
+										},
+										{
+											"Id": "CustomLogs",
+											"FullName": "AWS.EC2.Windows.CloudWatch.CustomLog.CustomLogInputComponent,AWS.EC2.Windows.CloudWatch",
+											"Parameters": {
+												"LogDirectoryPath":"C:\\Program Files\\Microsoft SQL Server\\MSSQL12.MSSQLSERVER\\MSSQL\\Log",
+												"TimestampFormat": "MM/dd/yyyy HH:mm:ss",
+												"Encoding": "UTF-8",
+												"Filter": "ERRORLOG",
+												"CultureName": "en-US",
+												"TimeZoneKind": "Local"
+											}
+										},
+										{
+											"Id" :"MemoryPerformanceCounter",
+											"FullName":"AWS.EC2.Windows.CloudWatch.PerformanceCounterComponent.PerformanceCounterInputComponent,AWS.EC2.Windows.CloudWatch",
+											"Parameters" : {
+												"CategoryName" : "Memory",
+												"CounterName" : "Available MBytes",
+												"InstanceName" : "",
+												"MetricName" : "Memory",
+												"Unit" : "Megabytes",
+												"DimensionName" :"InstanceId",
+												"DimensionValue" :"{instance_id}"
+											}
+										},
+										{
+											"Id": "PerformanceCounterDisk",
+											"FullName": "AWS.EC2.Windows.CloudWatch.PerformanceCounterComponent.PerformanceCounterInputComponent,AWS.EC2.Windows.CloudWatch",
+											"Parameters": {
+												"CategoryName": "LogicalDisk",
+												"CounterName": "% Free Space",
+												"InstanceName": "C:",
+												"MetricName": "FreeDiskPercentage",
+												"Unit": "Percent",
+												"DimensionName": "InstanceId",
+												"DimensionValue":"{instance_id}"
+											}
+										},
+										{
+											"Id": "CloudWatchLogs",
+											"FullName": "AWS.EC2.Windows.CloudWatch.CloudWatchLogsOutput,AWS.EC2.Windows.CloudWatch",
+											"Parameters": {
+												"AccessKey": "",
+												"SecretKey": "",
+							 					"Region": {
+													"Ref": "AWS::Region"
+												},
+												"LogGroup":{
+													"Ref": "rLogGroup"
+												},
+												"LogStream":"{instance_id}/{hostname}/{ip_address}"
+											}
+										},
+										{
+											"Id": "CloudWatch",
+											"FullName": "AWS.EC2.Windows.CloudWatch.CloudWatch.CloudWatchOutputComponent,AWS.EC2.Windows.CloudWatch",
+											"Parameters": 
+											{
+												"AccessKey": "",
+												"SecretKey": "",
+												"Region": {
+													"Ref": "AWS::Region"
+												},
+											    "NameSpace": "System/Windows"
+											}
+										}
+									],
+									"Flows": {
+										"Flows": 
+										[
+											"(ApplicationEventLog,SystemEventLog,SecurityEventLog),CloudWatchLogs",
+											"(MemoryPerformanceCounter,PerformanceCounterDisk),CloudWatch"
+										]
+									}	
+								}
+							}
+						}
+					}
+				}
+			}
+		},
+		"rLowSpaceAlarm": {
+			"Type": "AWS::CloudWatch::Alarm",
+			"Properties": {
+				"AlarmDescription": "Low Space Alarm",
+				"MetricName": "FreeDiskPercentage",
+				"Namespace": "System/Windows",
+				"Statistic": "Average",
+				"Period": "300",
+				"EvaluationPeriods": "1",
+				"Threshold": "10",
+				"AlarmActions": [
+					{
+						"Ref": "rAlarmNotificationTopic"
+					}
+				],
+				"ComparisonOperator": "LessThanThreshold"
+			}	
+        },
+		"rLowMemoryAlarm": {
+			"Type": "AWS::CloudWatch::Alarm",
+            "Properties": {
+                "AlarmDescription": "Low Memory Alarm",
+                "MetricName": "Memory",
+                "Namespace": "System/Windows",
+                "Statistic": "Average",
+                "Period": "300",
+                "EvaluationPeriods": "1",
+                "Threshold": "5",
+
+                "AlarmActions": [
+                    {
+                        "Ref": "rAlarmNotificationTopic"
+                    }
+                ],
+                "ComparisonOperator": "LessThanThreshold"
+            }
+        },
+		"rCPUAlarmLow": {
+			"Type": "AWS::CloudWatch::Alarm",
+			"Properties": {
+				"AlarmDescription": "CPU is less than 5% for 5 minutes",
+				"MetricName": "CPUUtilization",
+				"Namespace": "AWS/EC2",
+				"Statistic": "Average",
+				"Period": "300",
+				"EvaluationPeriods": "1",
+				"Threshold": "5",
+				"AlarmActions": [
+						{
+                        "Ref": "rAlarmNotificationTopic"
+						}
+					],
+				"ComparisonOperator": "LessThanThreshold"
+			}
+		},
+		"rAssocationSQLInstanceCloudwatch": {
+			"Type": "AWS::SSM::Association",
+			"Properties": {
+				"Name": {
+					"Ref": "rDocEC2CloudWatch"
+					},
+				"Targets": [{
+					"Key": "InstanceIds",
+					"Values": [{
+						"Fn::ImportValue": {
+							"Fn::Sub": "${pStackName}-SQLInstanceID"
+							}						
+					}]
+			    }]
+			}
+		},
+		"rAssocationWebServerInstanceCloudwatch": {
+			"Type": "AWS::SSM::Association",
+			"Properties": {
+				"Name": {
+					"Ref": "rDocEC2CloudWatch"
+					},
+				"Targets": [{
+					"Key": "InstanceIds",
+					"Values": [{
+						"Fn::ImportValue": {
+							"Fn::Sub": "${pStackName}-WebServerInstanceID"
+							}					
+					}]
+			    }]
+			}
+		},
+		"rAssocationAppServerInstanceCloudwatch": {
+			"Type": "AWS::SSM::Association",
+			"Properties": {
+				"Name": {
+					"Ref": "rDocEC2CloudWatch"
+					},
+				"Targets": [{
+					"Key": "InstanceIds",
+					"Values": [{
+						"Fn::ImportValue": {
+							"Fn::Sub": "${pStackName}-AppServerInstanceID"
+							}				
+					}]
+			    }]
+			}
+		},		
+		"rAssocationEnableEC2CloudwatchASG": {
+			"Type": "AWS::SSM::Association",
+			"Properties": {
+				"Name": {
+					"Ref": "rDocEC2CloudWatch"
+					},
+				"Targets": [{
+					"Key": "tag:aws:autoscaling:groupName",
+					"Values": [{
+						"Fn::ImportValue": {
+							"Fn::Sub": "${pStackName}-DPEAutoInstanceID"
+						}
+					}]
+				}]
+			}
+	    },
+		"rFlowLogsGroup": {
+			"Type": "AWS::Logs::LogGroup",
+			"Properties": {
+				"RetentionInDays": 30
+			}
+		},
+		"rVPCFlowLog" : {
+			"Type" : "AWS::EC2::FlowLog",
+			"Properties" : {
+				"DeliverLogsPermissionArn" : { "Fn::GetAtt" : ["rVPCFlowLogRole", "Arn"]},
+				"LogGroupName" :"rFlowLogsGroup",
+				"ResourceId" :{"Fn::ImportValue": {"Fn::Sub": "${pStackVPCName}-VPCID"}},
+				"ResourceType" : "VPC",
+				"TrafficType" : "ALL"
+			}
+		},
+        "rVPCFlowLogRole": {
+			"Type": "AWS::IAM::Role",
+			"Properties":  { 
+				"AssumeRolePolicyDocument": {
+					"Version" : "2012-10-17",
+					"Statement": [{
+						"Effect": "Allow",
+						"Principal": {
+							"Service": ["vpc-flow-logs.amazonaws.com"]
+							},
+						"Action": ["sts:AssumeRole"]
+					}]
+				},
+				"Path": "/",
+				"Policies": [{
+					"PolicyName": "Policy-Attached-to-IAM-role",
+					"PolicyDocument": {
+						"Version": "2012-10-17",
+						"Statement": [{
+							"Action": [
+								"logs:CreateLogGroup",
+								"logs:CreateLogStream",
+								"logs:PutLogEvents",
+								"logs:DescribeLogGroups",
+								"logs:DescribeLogStreams"
+							],
+							"Effect": "Allow",
+							"Resource": "*"
+						}]
+					}
+				}]
+			}
+			
+		}
+	},		
+	"Outputs": {
+		"Documentation": {
+			"Value": "http://accessdata.com/products-services",
+			"Description": "Accessdata Website"
+		},
+		
+		"EULA": {
+			"Value": "http://accessdata.com/ADG_EULA",
+			"Description": "End User License Agreement"
+		}
+	}
+}
